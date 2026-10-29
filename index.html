@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Controle de Efetividade e Banco de Horas</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- jsPDF & jsPDF-AutoTable para geração de PDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+
+  <!-- Firebase App & Firestore Modular SDKs -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { 
+      getFirestore, 
+      collection, 
+      onSnapshot, 
+      doc, 
+      setDoc, 
+      deleteDoc, 
+      enableIndexedDbPersistence 
+    } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    // Configuração do seu projeto no Firebase
+    const firebaseConfig = {
+      apiKey: "AIzaSyDxI_xeasX0ZEGsMIAXPr5XXCLCf_yQYbs",
+      authDomain: "controle-efetividade.firebaseapp.com",
+      projectId: "controle-efetividade",
+      storageBucket: "controle-efetividade.firebasestorage.app",
+      messagingSenderId: "455906320227",
+      appId: "1:455906320227:web:f32c73a7e88043fc10fd56"
+    };
+
+    // Inicialização do Firebase e Firestore
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // Ativa suporte offline para quando ficar sem sinal de rede
+    enableIndexedDbPersistence(db).catch((err) => {
+      console.warn("Suporte offline do Firestore não ativado:", err.code);
+    });
+
+    // Exposição dos módulos para o escopo global do script
+    window.db = db;
+    window.firestoreTools = { collection, onSnapshot, doc, setDoc, deleteDoc };
+  </script>
+
+  <style>
+    body {
+      background-color: #f1f5f9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+  </style>
+</head>
+<body class="p-3 sm:p-6 text-slate-800">
+  <div class="max-w-4xl mx-auto space-y-5">
+    
+    <!-- Cabeçalho Principal -->
+    <header class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col sm:flex-row justify-between items-center gap-4">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-800 flex items-center gap-2">
+          <span>⏱️</span> Controle de Efetividade
+        </h1>
+        <p class="text-sm text-slate-500 font-medium mt-0.5">Jornada de 6h diárias (360 min) — 21 a 20</p>
+      </div>
+      
+      <!-- Indicador de Status da Nuvem -->
+      <div id="cloudStatus" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+        <span class="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse"></span>
+        <span>Conectando à nuvem...</span>
+      </div>
+    </header>
+
+    <!-- Banner de Virada de Ciclo (Ativado a partir do dia 21) -->
+    <div id="cycleTransitionBanner" class="hidden bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-5 rounded-2xl shadow-md border border-indigo-700 space-y-3">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex items-center gap-2 font-bold text-lg">
+          <span>🔔</span> Fim de Efetividade Detectado!
+        </div>
+        <span class="text-xs font-semibold bg-white/20 px-2.5 py-1 rounded-full uppercase tracking-wider">Novo Ciclo</span>
+      </div>
+      <p class="text-sm text-indigo-100">
+        Hoje é dia 21 ou mais. O seu período anterior foi concluído. Salve o relatório em PDF com o seu saldo acumulado e inicie o novo período com a tabela zerada para os novos registros.
+      </p>
+      <div class="flex flex-wrap items-center gap-3 pt-1">
+        <button onclick="downloadPDF()" class="bg-white text-indigo-700 hover:bg-indigo-50 px-4 py-2 rounded-xl text-sm font-bold shadow-sm transition">
+          📄 Baixar PDF do Período
+        </button>
+        <button onclick="confirmCycleTransition()" class="bg-indigo-950 hover:bg-black text-white px-4 py-2 rounded-xl text-sm font-bold shadow-sm transition">
+          🔄 Iniciar Novo Período Zerado
+        </button>
+      </div>
+    </div>
+
+    <!-- Painel de Seleção de Período & Saldo Acumulado -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      
+      <!-- Seleção de Ciclo -->
+      <div class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between space-y-2">
+        <label class="text-xs font-bold text-slate-400 uppercase tracking-wider">Período Selecionado</label>
+        <div class="flex items-center justify-between gap-2">
+          <button onclick="changeCycle(-1)" class="p-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition" title="Período Anterior">←</button>
+          <span id="periodLabel" class="font-bold text-slate-700 text-center text-sm sm:text-base">--/--/---- a --/--/----</span>
+          <button onclick="changeCycle(1)" class="p-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition" title="Próximo Período">→</button>
+        </div>
+        <button onclick="setCurrentCycle()" class="text-xs text-blue-600 font-semibold hover:underline text-center pt-1">Ir para o período atual</button>
+      </div>
+
+      <!-- Card do Saldo Acumulado -->
+      <div class="md:col-span-2 bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Saldo Acumulado do Período</span>
+          <div id="totalBalanceBadge" class="text-3xl font-black mt-1 text-slate-700">
+            00:00
+          </div>
+          <p id="totalBalanceSubtext" class="text-xs text-slate-400 mt-0.5">Soma exata em minutos inteiros</p>
+        </div>
+        
+        <!-- Ações Globais -->
+        <div class="flex items-center gap-2 w-full sm:w-auto">
+          <button onclick="downloadPDF()" class="flex-1 sm:flex-initial bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl font-bold text-sm shadow-sm transition flex items-center justify-center gap-2">
+            <span>📄</span> Gerar PDF
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Painel de Bater Ponto & Registro Manual -->
+    <div class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+      <h2 class="text-sm font-bold text-slate-400 uppercase tracking-wider">Registro de Ponto</h2>
+      
+      <!-- Bater Ponto Automático -->
+      <div class="grid grid-cols-2 gap-3">
+        <button onclick="quickClock('in')" class="bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white p-3.5 rounded-xl font-bold shadow-sm transition flex items-center justify-center gap-2">
+          <span>🟢</span> Bater Entrada
+        </button>
+        <button onclick="quickClock('out')" class="bg-rose-600 hover:bg-rose-700 active:scale-[0.98] text-white p-3.5 rounded-xl font-bold shadow-sm transition flex items-center justify-center gap-2">
+          <span>🔴</span> Bater Saída
+        </button>
+      </div>
+
+      <hr class="border-slate-100" />
+
+      <!-- Registro / Edição Manual -->
+      <form id="manualForm" onsubmit="handleManualSubmit(event)" class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 mb-1">Data</label>
+          <input type="date" id="manualDate" required class="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 mb-1">Entrada</label>
+          <input type="time" id="manualIn" class="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 mb-1">Saída</label>
+          <input type="time" id="manualOut" class="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div class="flex items-end gap-2">
+          <button type="submit" class="flex-1 bg-slate-800 hover:bg-slate-900 text-white p-2.5 rounded-xl font-bold text-sm shadow-sm transition">
+            Salvar
+          </button>
+          <button type="button" onclick="toggleHolidayCurrent()" class="bg-amber-500 hover:bg-amber-600 text-white p-2.5 rounded-xl font-bold text-sm shadow-sm transition" title="Marcar/Desmarcar Feriado">
+            🏖️
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Tabela de Registros -->
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div class="p-4 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="font-bold text-slate-700">Registros do Período</h3>
+        <span id="recordCount" class="text-xs font-semibold text-slate-400">0 dias</span>
+      </div>
+      
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse">
+          <thead>
+            <tr class="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+              <th class="p-3.5 pl-5">Data</th>
+              <th class="p-3.5">Entrada</th>
+              <th class="p-3.5">Saída</th>
+              <th class="p-3.5">Saldo</th>
+              <th class="p-3.5 text-right pr-5">Ações</th>
+            </tr>
+          </thead>
+          <tbody id="recordsTable" class="divide-y divide-slate-100 text-sm">
+            <!-- Linhas inseridas via JS -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Script Principal da Aplicação -->
+  <script>
+    // Estado Global da Aplicação
+    let currentOffset = 0; // 0 = Período Atual
+    let recordsData = {}; // Armazena todos os registros por ID (YYYY-MM-DD)
+
+    // Inicialização ao carregar a página
+    window.addEventListener("DOMContentLoaded", () => {
+      // Define a data atual como padrão no formulário manual
+      document.getElementById("manualDate").value = getTodayISO();
+
+      // Aguarda a conexão com o Firestore
+      const checkFirebase = setInterval(() => {
+        if (window.db && window.firestoreTools) {
+          clearInterval(checkFirebase);
+          initFirebaseSync();
+        }
+      }, 100);
+    });
+
+    // Função para obter data ISO local (YYYY-MM-DD)
+    function getTodayISO() {
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    // Calcula as datas de início e fim do ciclo (Dia 21 ao Dia 20)
+    function getCycleBounds(offset = 0) {
+      const now = new Date();
+      let year = now.getFullYear();
+      let month = now.getMonth(); // 0 a 11
+
+      if (now.getDate() < 21) {
+        month -= 1;
+      }
+
+      month += offset;
+
+      const startDate = new Date(year, month, 21);
+      const endDate = new Date(year, month + 1, 20);
+
+      return { startDate, endDate };
+    }
+
+    // Formata objeto Date para DD/MM/YYYY
+    function formatDateBR(date) {
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      return `${day}/${month}/${year}`;
+    }
+
+    // Sincronização em Tempo Real com o Firestore
+    function initFirebaseSync() {
+      const { collection, onSnapshot } = window.firestoreTools;
+      const recordsRef = collection(window.db, "registos");
+
+      onSnapshot(recordsRef, (snapshot) => {
+        recordsData = {};
+        snapshot.forEach((doc) => {
+          recordsData[doc.id] = doc.data();
+        });
+
+        // Atualiza o status da conexão
+        const cloudStatus = document.getElementById("cloudStatus");
+        cloudStatus.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-xs font-semibold text-emerald-700 border border-emerald-200";
+        cloudStatus.innerHTML = `<span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Sincronizado`;
+
+        renderApp();
+      }, (error) => {
+        console.error("Erro na sincronização:", error);
+        const cloudStatus = document.getElementById("cloudStatus");
+        cloudStatus.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 text-xs font-semibold text-amber-700 border border-amber-200";
+        cloudStatus.innerHTML = `<span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Modo Offline`;
+      });
+    }
+
+    // Salva ou atualiza um registro no Firestore
+    async function saveRecord(dateISO, data) {
+      const { doc, setDoc } = window.firestoreTools;
+      const ref = doc(window.db, "registos", dateISO);
+      
+      const existing = recordsData[dateISO] || {};
+      const updated = {
+        date: dateISO,
+        clockIn: data.clockIn !== undefined ? data.clockIn : (existing.clockIn || ""),
+        clockOut: data.clockOut !== undefined ? data.clockOut : (existing.clockOut || ""),
+        isHoliday: data.isHoliday !== undefined ? data.isHoliday : (existing.isHoliday || false)
+      };
+
+      await setDoc(ref, updated, { merge: true });
+    }
+
+    // Exclui um registro
+    async function deleteRecord(dateISO) {
+      if (confirm(`Deseja realmente excluir o registro do dia ${dateISO.split('-').reverse().join('/')}?`)) {
+        const { doc, deleteDoc } = window.firestoreTools;
+        await deleteDoc(doc(window.db, "registos", dateISO));
+      }
+    }
+
+    // Converte HH:MM para minutos desde a meia-noite
+    function timeToMinutes(timeStr) {
+      if (!timeStr) return null;
+      const [h, m] = timeStr.split(':').map(Number);
+      return h * 60 + m;
+    }
+
+    // Converte minutos para string formatada (+HH:MM, -HH:MM, 00:00)
+    function minutesToFormatted(mins) {
+      const sign = mins > 0 ? "+" : mins < 0 ? "-" : "";
+      const abs = Math.abs(mins);
+      const h = String(Math.floor(abs / 60)).padStart(2, '0');
+      const m = String(abs % 60).padStart(2, '0');
+      return `${sign}${h}:${m}`;
+    }
+
+    // Renderização Geral da Aplicação
+    function renderApp() {
+      const bounds = getCycleBounds(currentOffset);
+      document.getElementById("periodLabel").textContent = `${formatDateBR(bounds.startDate)} a ${formatDateBR(bounds.endDate)}`;
+
+      // Verifica se deve exibir o Banner de Virada de Ciclo
+      const today = new Date();
+      const isPastOrExact21 = today.getDate() >= 21;
+      const isCurrentCycle = currentOffset === 0;
+
+      if (isCurrentCycle && isPastOrExact21) {
+        document.getElementById("cycleTransitionBanner").classList.remove("hidden");
+      } else {
+        document.getElementById("cycleTransitionBanner").classList.add("hidden");
+      }
+
+      // Filtra e ordena os registros do ciclo atual
+      const tbody = document.getElementById("recordsTable");
+      tbody.innerHTML = "";
+
+      let totalMinutes = 0;
+      let count = 0;
+
+      const sortedDates = Object.keys(recordsData).sort();
+
+      sortedDates.forEach((dateISO) => {
+        const [y, m, d] = dateISO.split('-').map(Number);
+        const recordDate = new Date(y, m - 1, d);
+
+        if (recordDate >= bounds.startDate && recordDate <= bounds.endDate) {
+          count++;
+          const rec = recordsData[dateISO];
+          const dayOfWeek = recordDate.getDay(); // 0 = Dom, 6 = Sáb
+          const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+          let dailyBalanceMin = null;
+          let dailyStatusText = "";
+
+          const inMin = timeToMinutes(rec.clockIn);
+          const outMin = timeToMinutes(rec.clockOut);
+
+          if (inMin !== null && outMin !== null && outMin >= inMin) {
+            const worked = outMin - inMin;
+            if (isWeekend || rec.isHoliday) {
+              dailyBalanceMin = worked; // Finais de semana e feriados somam integralmente
+            } else {
+              dailyBalanceMin = worked - 360; // Dia útil normal: trabalhado - 6 horas (360m)
+            }
+            totalMinutes += dailyBalanceMin;
+            dailyStatusText = minutesToFormatted(dailyBalanceMin);
+          } else if (rec.clockIn || rec.clockOut) {
+            dailyStatusText = "Incompleto";
+          } else if (rec.isHoliday) {
+            dailyStatusText = "Feriado";
+          } else {
+            dailyStatusText = "--:--";
+          }
+
+          // Cria a linha da tabela
+          const tr = document.createElement("tr");
+          tr.className = "hover:bg-slate-50/80 transition";
+
+          let balanceColor = "text-slate-400";
+          if (dailyBalanceMin > 0) balanceColor = "text-emerald-600 font-bold";
+          else if (dailyBalanceMin < 0) balanceColor = "text-rose-600 font-bold";
+          else if (dailyBalanceMin === 0 && dailyStatusText !== "--:--") balanceColor = "text-blue-600 font-bold";
+
+          tr.innerHTML = `
+            <td class="p-3.5 pl-5 font-semibold text-slate-700">
+              ${formatDateBR(recordDate)}
+              ${rec.isHoliday ? '<span class="ml-1 text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">Feriado</span>' : ''}
+              ${isWeekend ? '<span class="ml-1 text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-medium">FDS</span>' : ''}
+            </td>
+            <td class="p-3.5 text-slate-600 font-medium">${rec.clockIn || '--:--'}</td>
+            <td class="p-3.5 text-slate-600 font-medium">${rec.clockOut || '--:--'}</td>
+            <td class="p-3.5 ${balanceColor}">${dailyStatusText}</td>
+            <td class="p-3.5 text-right pr-5">
+              <button onclick="editRecord('${dateISO}')" class="text-blue-600 hover:text-blue-800 font-semibold text-xs mr-2">Editar</button>
+              <button onclick="deleteRecord('${dateISO}')" class="text-rose-500 hover:text-rose-700 font-semibold text-xs">Excluir</button>
+            </td>
+          `;
+
+          tbody.appendChild(tr);
+        }
+      });
+
+      document.getElementById("recordCount").textContent = `${count} ${count === 1 ? 'dia' : 'dias'}`;
+
+      // Atualiza Badge do Saldo Acumulado Total
+      const badge = document.getElementById("totalBalanceBadge");
+      const formattedTotal = minutesToFormatted(totalMinutes);
+      badge.textContent = formattedTotal;
+
+      if (totalMinutes > 0) {
+        badge.className = "text-3xl font-black mt-1 text-emerald-600";
+      } else if (totalMinutes < 0) {
+        badge.className = "text-3xl font-black mt-1 text-rose-600";
+      } else {
+        badge.className = "text-3xl font-black mt-1 text-blue-600";
+      }
+    }
+
+    // Ações Rápidas de Bater Ponto
+    async function quickClock(type) {
+      const todayISO = getTodayISO();
+      const now = new Date();
+      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      if (type === 'in') {
+        await saveRecord(todayISO, { clockIn: timeStr });
+      } else {
+        await saveRecord(todayISO, { clockOut: timeStr });
+      }
+    }
+
+    // Submissão do Formulário Manual
+    async function handleManualSubmit(e) {
+      e.preventDefault();
+      const dateISO = document.getElementById("manualDate").value;
+      const clockIn = document.getElementById("manualIn").value;
+      const clockOut = document.getElementById("manualOut").value;
+
+      if (!dateISO) return;
+
+      await saveRecord(dateISO, { clockIn, clockOut });
+
+      document.getElementById("manualIn").value = "";
+      document.getElementById("manualOut").value = "";
+    }
+
+    // Alternar Feriado na data selecionada
+    async function toggleHolidayCurrent() {
+      const dateISO = document.getElementById("manualDate").value;
+      if (!dateISO) return;
+
+      const existing = recordsData[dateISO] || {};
+      await saveRecord(dateISO, { isHoliday: !existing.isHoliday });
+    }
+
+    // Preenche o formulário manual para edição
+    function editRecord(dateISO) {
+      const rec = recordsData[dateISO] || {};
+      document.getElementById("manualDate").value = dateISO;
+      document.getElementById("manualIn").value = rec.clockIn || "";
+      document.getElementById("manualOut").value = rec.clockOut || "";
+    }
+
+    // Navegação entre Ciclos
+    function changeCycle(direction) {
+      currentOffset += direction;
+      renderApp();
+    }
+
+    function setCurrentCycle() {
+      currentOffset = 0;
+      renderApp();
+    }
+
+    // Confirmação da Virada de Ciclo
+    function confirmCycleTransition() {
+      if (confirm("Deseja confirmar a mudança para o novo período? Verifique se já gerou o PDF do período anterior para registro.")) {
+        currentOffset = 0;
+        renderApp();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+
+    // Geração de PDF Válido e Formatado
+    function downloadPDF() {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF();
+
+      const bounds = getCycleBounds(currentOffset);
+      const periodStr = `${formatDateBR(bounds.startDate)} a ${formatDateBR(bounds.endDate)}`;
+
+      // Título
+      doc.setFontSize(18);
+      doc.setTextColor(30, 41, 59);
+      doc.text("Controle de Efetividade e Banco de Horas", 14, 20);
+
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`Período de Efetividade: ${periodStr}`, 14, 28);
+      doc.text(`Relatório gerado em: ${new Date().toLocaleString('pt-BR')}`, 14, 34);
+
+      // Mapeia os dados da tabela
+      const tableRows = [];
+      let totalMinutes = 0;
+
+      const sortedDates = Object.keys(recordsData).sort();
+
+      sortedDates.forEach((dateISO) => {
+        const [y, m, d] = dateISO.split('-').map(Number);
+        const recordDate = new Date(y, m - 1, d);
+
+        if (recordDate >= bounds.startDate && recordDate <= bounds.endDate) {
+          const rec = recordsData[dateISO];
+          const dayOfWeek = recordDate.getDay();
+          const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+          let statusText = "--:--";
+          const inMin = timeToMinutes(rec.clockIn);
+          const outMin = timeToMinutes(rec.clockOut);
+
+          if (inMin !== null && outMin !== null && outMin >= inMin) {
+            const worked = outMin - inMin;
+            const diff = (isWeekend || rec.isHoliday) ? worked : (worked - 360);
+            totalMinutes += diff;
+            statusText = minutesToFormatted(diff);
+          } else if (rec.clockIn || rec.clockOut) {
+            statusText = "Incompleto";
+          } else if (rec.isHoliday) {
+            statusText = "Feriado";
+          }
+
+          let tag = "";
+          if (rec.isHoliday) tag = " (Feriado)";
+          else if (isWeekend) tag = " (FDS)";
+
+          tableRows.push([
+            `${formatDateBR(recordDate)}${tag}`,
+            rec.clockIn || '--:--',
+            rec.clockOut || '--:--',
+            statusText
+          ]);
+        }
+      });
+
+      // Tabela no PDF
+      doc.autoTable({
+        startY: 42,
+        head: [['Data', 'Entrada', 'Saída', 'Saldo Diário']],
+        body: tableRows,
+        theme: 'striped',
+        headStyles: { fillColor: [30, 41, 59] },
+        styles: { fontSize: 9 }
+      });
+
+      // Saldo Acumulado no Final do PDF
+      const finalY = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(12);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(30, 41, 59);
+      doc.text(`Saldo Acumulado do Período: ${minutesToFormatted(totalMinutes)}`, 14, finalY);
+
+      // Salva o arquivo PDF
+      doc.save(`Efetividade_${periodStr.replace(/[\/ ]/g, '_')}.pdf`);
+    }
+  </script>
+</body>
+</html>
